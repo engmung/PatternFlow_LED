@@ -8,8 +8,8 @@ const PIXEL_SIZE = LED_SIZE + LED_GAP;
 
 // 타일 사이즈 계산 헬퍼
 function computeTileSize(tileCols, tileRows, gap) {
-  const availW = COLS - (tileCols + 1) * gap;
-  const availH = ROWS - (tileRows + 1) * gap;
+  const availW = COLS - Math.max(0, tileCols - 1) * gap;
+  const availH = ROWS - Math.max(0, tileRows - 1) * gap;
   return Math.floor(Math.min(availW / tileCols, availH / tileRows));
 }
 
@@ -25,10 +25,12 @@ function getDivisors(n) {
 
 // 최대 gap 계산 (tileSize >= 2 보장)
 function computeMaxGap(tileCols, tileRows) {
-  // tileSize = floor(min((COLS - (tileCols+1)*gap)/tileCols, (ROWS - (tileRows+1)*gap)/tileRows)) >= 2
-  const maxFromW = Math.floor((COLS - tileCols * 2) / (tileCols + 1));
-  const maxFromH = Math.floor((ROWS - tileRows * 2) / (tileRows + 1));
-  return Math.max(0, Math.min(maxFromW, maxFromH, 10));
+  // tileSize = floor(min((COLS - (cols-1)*gap)/cols, (ROWS - (rows-1)*gap)/rows)) >= 2
+  if (tileCols <= 1 && tileRows <= 1) return 10;
+  let maxGap = 10;
+  if (tileCols > 1) maxGap = Math.min(maxGap, Math.floor((COLS - tileCols * 2) / (tileCols - 1)));
+  if (tileRows > 1) maxGap = Math.min(maxGap, Math.floor((ROWS - tileRows * 2) / (tileRows - 1)));
+  return Math.max(0, maxGap);
 }
 
 // === Color Ramp 기본값 ===
@@ -93,60 +95,81 @@ function sampleColorRamp(val, stops, stepped) {
   }
 }
 
+// === 타일 로직 공통 분리 ===
+function runTileMath(x, y, t, p, mathFn) {
+  const gap = p.tileGap;
+  const tr = p.tileRows;
+  const tc = tr * 2;
+  const tileSize = computeTileSize(tc, tr, gap);
+  if (tileSize <= 0) return -1;
+
+  const totalW = tc * tileSize + Math.max(0, tc - 1) * gap;
+  const totalH = tr * tileSize + Math.max(0, tr - 1) * gap;
+  const offsetX = Math.floor((COLS - totalW) / 2);
+  const offsetY = Math.floor((ROWS - totalH) / 2);
+
+  const lx = x - offsetX;
+  const ly = y - offsetY;
+
+  const cellW = tileSize + gap;
+  const cellH = tileSize + gap;
+  const ti = Math.floor(lx / cellW);
+  const tj = Math.floor(ly / cellH);
+
+  if (ti < 0 || ti >= tc || tj < 0 || tj >= tr) return -1;
+
+  const tileStartX = ti * cellW;
+  const tileStartY = tj * cellH;
+  const localX = lx - tileStartX;
+  const localY = ly - tileStartY;
+
+  if (localX < 0 || localX >= tileSize || localY < 0 || localY >= tileSize)
+    return -1;
+
+  const gridStep = Math.max(1, Math.round(p.density));
+  const sampledX = Math.floor(localX / gridStep) * gridStep + gridStep / 2;
+  const sampledY = Math.floor(localY / gridStep) * gridStep + gridStep / 2;
+
+  const cx = tileSize / 2;
+  const cy = tileSize / 2;
+  const dx = sampledX - cx;
+  const dy = sampledY - cy;
+
+  const tileIndex = tj * tc + ti;
+  const freqBase = p.freq1;
+  const freqStep = p.freq2 * 0.15;
+  const tileFreq = freqBase + tileIndex * freqStep;
+
+  return mathFn(dx, dy, t, p, tileFreq, tileIndex, tileSize);
+}
+
 // 패턴 프리셋
 const PRESETS = [
   {
     name: "Circular Wave Grid",
-    fn: (x, y, t, p) => {
-      const gap = p.tileGap;
-      const tr = p.tileRows;
-      const tc = tr * 2;
-      const tileSize = computeTileSize(tc, tr, gap);
-      if (tileSize <= 0) return -1;
-
-      const totalW = tc * tileSize + (tc + 1) * gap;
-      const totalH = tr * tileSize + (tr + 1) * gap;
-      const offsetX = Math.floor((COLS - totalW) / 2);
-      const offsetY = Math.floor((ROWS - totalH) / 2);
-
-      const lx = x - offsetX;
-      const ly = y - offsetY;
-
-      const cellW = tileSize + gap;
-      const cellH = tileSize + gap;
-      const ti = Math.floor((lx - gap) / cellW);
-      const tj = Math.floor((ly - gap) / cellH);
-
-      if (ti < 0 || ti >= tc || tj < 0 || tj >= tr) return -1;
-
-      const tileStartX = gap + ti * cellW;
-      const tileStartY = gap + tj * cellH;
-      const localX = lx - tileStartX;
-      const localY = ly - tileStartY;
-
-      if (localX < 0 || localX >= tileSize || localY < 0 || localY >= tileSize)
-        return -1;
-
-      const gridStep = Math.max(1, Math.round(p.density));
-      const sampledX =
-        Math.floor(localX / gridStep) * gridStep + gridStep / 2;
-      const sampledY =
-        Math.floor(localY / gridStep) * gridStep + gridStep / 2;
-
-      const cx = tileSize / 2;
-      const cy = tileSize / 2;
-      const dx = sampledX - cx;
-      const dy = sampledY - cy;
+    fn: (x, y, t, p) => runTileMath(x, y, t, p, (dx, dy, t, p, freq, idx, tileSize) => {
       const dist = Math.sqrt(dx * dx + dy * dy);
-
-      const tileIndex = tj * tc + ti;
-      const freqBase = p.freq1;
-      const freqStep = p.freq2 * 0.15;
-      const tileFreq = freqBase + tileIndex * freqStep;
-
-      const wave = Math.sin(dist * tileFreq * 0.5 + t * p.speed * 2);
-      return wave;
-    },
+      return Math.sin(dist * freq * 0.5 + t * p.speed * 2);
+    }),
+  },
+  {
+    name: "Woven Links",
+    fn: (x, y, t, p) => runTileMath(x, y, t, p, (dx, dy, t, p, freq, idx, tileSize) => {
+      // 타일 내부 좌표를 -1.0 ~ 1.0으로 정규화하여 경계선 매칭을 유도
+      const nx = dx / (tileSize / 2);
+      const ny = dy / (tileSize / 2);
+      // 코사인 곱으로 그물망 형태 생성
+      const val = Math.cos(nx * freq * 2) * Math.cos(ny * freq * 2);
+      return Math.sin(val * 3 + t * p.speed * 2);
+    }),
+  },
+  {
+    name: "Fluid Metaballs",
+    fn: (x, y, t, p) => runTileMath(x, y, t, p, (dx, dy, t, p, freq, idx, tileSize) => {
+      // X축, Y축 독립된 파동이 합쳐지며 경계를 넘어 물방울처럼 융합
+      const val = Math.sin(dx * freq * 0.4 + t * p.speed) + Math.cos(dy * freq * 0.4 - t * p.speed);
+      return Math.sin(val * 1.5);
+    }),
   },
 ];
 
@@ -616,13 +639,13 @@ export default function PatternFlowSimulator() {
   const startTimeRef = useRef(Date.now());
   const [playing, setPlaying] = useState(true);
   const [presetIdx, setPresetIdx] = useState(0);
-  const [brightness, setBrightness] = useState(80);
+  const brightness = 100;
   const [params, setParams] = useState({
     freq1: 3.0,
-    freq2: 2.5,
+    freq2: 0.3,
     speed: 0.5,
     density: 3,
-    tileGap: 2,
+    tileGap: 1,
     tileRows: 3,
   });
 
@@ -635,7 +658,8 @@ export default function PatternFlowSimulator() {
     () => computeTileSize(tileCols, tileRows, params.tileGap),
     [tileCols, tileRows, params.tileGap]
   );
-  const validGridSteps = useMemo(() => getDivisors(tileSize), [tileSize]);
+  const gridStepMax = Math.max(5, Math.floor(tileSize / 2));
+  const validGridSteps = useMemo(() => getDivisors(tileSize).filter(d => d >= 1 && d <= gridStepMax), [tileSize, gridStepMax]);
   const maxGap = useMemo(
     () => computeMaxGap(tileCols, tileRows),
     [tileCols, tileRows]
@@ -659,9 +683,29 @@ export default function PatternFlowSimulator() {
   }, [maxGap, params.tileGap]);
   const [showCode, setShowCode] = useState(false);
 
-  // Color Ramp state
-  const [colorStops, setColorStops] = useState([...DEFAULT_COLOR_RAMP]);
-  const [stepped, setStepped] = useState(true);
+  // Color Ramp state (localStorage 지속)
+  const [colorStops, setColorStops] = useState(() => {
+    try {
+      const saved = localStorage.getItem('pf_colorStops');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [...DEFAULT_COLOR_RAMP];
+  });
+  const [stepped, setStepped] = useState(() => {
+    try {
+      const saved = localStorage.getItem('pf_stepped');
+      if (saved !== null) return JSON.parse(saved);
+    } catch {}
+    return true;
+  });
+
+  // colorStops / stepped 변경 시 localStorage 저장
+  useEffect(() => {
+    try { localStorage.setItem('pf_colorStops', JSON.stringify(colorStops)); } catch {}
+  }, [colorStops]);
+  useEffect(() => {
+    try { localStorage.setItem('pf_stepped', JSON.stringify(stepped)); } catch {}
+  }, [stepped]);
 
   const sortedStops = useMemo(
     () => [...colorStops].sort((a, b) => a.position - b.position),
@@ -936,8 +980,8 @@ void sampleColorRamp(float val, uint8_t &r, uint8_t &g, uint8_t &b) {
 int totalW, totalH, offsetX, offsetY;
 
 void computeLayout() {
-  totalW = TILE_COLS * TILE_SIZE + (TILE_COLS + 1) * TILE_GAP;
-  totalH = TILE_ROWS * TILE_SIZE + (TILE_ROWS + 1) * TILE_GAP;
+  totalW = TILE_COLS * TILE_SIZE + (TILE_COLS > 1 ? TILE_COLS - 1 : 0) * TILE_GAP;
+  totalH = TILE_ROWS * TILE_SIZE + (TILE_ROWS > 1 ? TILE_ROWS - 1 : 0) * TILE_GAP;
   offsetX = (PANEL_W - totalW) / 2;
   offsetY = (PANEL_H - totalH) / 2;
 }
@@ -969,8 +1013,8 @@ void renderPattern(float time) {
       
       int cellW = TILE_SIZE + TILE_GAP;
       int cellH = TILE_SIZE + TILE_GAP;
-      int ti = (lx - TILE_GAP) / cellW;
-      int tj = (ly - TILE_GAP) / cellH;
+      int ti = lx / cellW;
+      int tj = ly / cellH;
       
       // Outside grid → LED off
       if (ti < 0 || ti >= TILE_COLS || tj < 0 || tj >= TILE_ROWS) {
@@ -978,8 +1022,8 @@ void renderPattern(float time) {
         continue;
       }
       
-      int tileStartX = TILE_GAP + ti * cellW;
-      int tileStartY = TILE_GAP + tj * cellH;
+      int tileStartX = ti * cellW;
+      int tileStartY = tj * cellH;
       int localX = lx - tileStartX;
       int localY = ly - tileStartY;
       
@@ -1268,7 +1312,7 @@ void loop() {
               label="Tile Gap"
               value={params.tileGap}
               min={0}
-              max={maxGap}
+              max={Math.min(maxGap, 5)}
               step={1}
               onChange={(v) => setParams({ ...params, tileGap: v })}
             />
@@ -1322,29 +1366,20 @@ void loop() {
               onChange={(v) => setParams({ ...params, freq1: v })}
             />
             <Slider
-              label="Freq Variation"
+              label="Freq Variation(8-step)"
               value={params.freq2}
-              min={0}
-              max={15}
-              step={0.1}
+              min={0.3}
+              max={35.3}
+              step={5.0}
               onChange={(v) => setParams({ ...params, freq2: v })}
             />
             <Slider
               label="Speed"
               value={params.speed}
               min={0}
-              max={3}
-              step={0.05}
+              max={10}
+              step={0.1}
               onChange={(v) => setParams({ ...params, speed: v })}
-            />
-            <Slider
-              label="Brightness"
-              value={brightness}
-              min={5}
-              max={100}
-              step={1}
-              onChange={setBrightness}
-              unit="%"
             />
           </div>
 
