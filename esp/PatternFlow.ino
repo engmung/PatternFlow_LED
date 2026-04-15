@@ -1,22 +1,11 @@
-// ═══════════════════════════════════════════════════════════
 // PatternFlow Light — ESP32-S3 + HUB75E, Dual Core, 4 Knobs
 // ═══════════════════════════════════════════════════════════
 //
-//  물리 노브 배치 (정면 기준):
-//   ┌───────────────────┐
-//   │  Knob4(⚡)  Knob3(🎲) │
-//   │  Q2/Speed   Q1/Pattern │
-//   │                       │
-//   │  Knob1(🎨)  Knob2(🔀) │
-//   │  Q3/Hue     Q4/Mode   │
-//   └───────────────────┘
-//
-// Knob 1 (GPIO4, Q3-좌하): Hue       🎨  (continuous)
-// Knob 2 (GPIO5, Q4-우하): Mode      🔀  (6 presets, snap)
-// Knob 3 (GPIO6, Q1-우상): Pattern   🎲  (8-step: 0=uniform, 1-7=random)
-// Knob 4 (GPIO7, Q2-좌상): Speed     ⚡  (continuous, 0~8)
-// Brightness: 255 고정
-// ADC: 경량화 — 4x 평균 + 단일 EMA (납땜 수정 후)
+// Knob 1 (GPIO4): Hue        🎨  (continuous)
+// Knob 2 (GPIO5): Brightness 💡  (continuous)
+// Knob 3 (GPIO6): Mode       🔀  (6 presets, snap)
+// Knob 4 (GPIO7): Freq       🎲  (8-step: 0=uniform, 1-7=random)
+// ADC: 경량화 — 4x 평균 + 단일 EMA
 // ═══════════════════════════════════════════════════════════
 
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
@@ -28,29 +17,29 @@
 #define PANEL_H     64
 #define PANEL_CHAIN 1
 
-// ─── HUB75E Pin Mapping ───
+// ─── HUB75E Pin Mapping (V2) ───
 #define R1_PIN  42
 #define G1_PIN  41
 #define B1_PIN  40
 #define R2_PIN  38
 #define G2_PIN  39
-#define B2_PIN  13
-#define A_PIN   45
-#define B_PIN   11
-#define C_PIN   48
-#define D_PIN   12
-#define E_PIN   21
+#define B2_PIN  45
+#define A_PIN   14
+#define B_PIN   15
+#define C_PIN   16
+#define D_PIN   17
+#define E_PIN   18
 #define LAT_PIN 47
-#define OE_PIN  14
+#define OE_PIN  48
 #define CLK_PIN 2
 
 MatrixPanel_I2S_DMA *dma_display = nullptr;
 
-// ─── Knob Pins (물리 위치 → GPIO 매핑) ───
-#define PIN_KNOB_HUE     4   // Knob1, Q3(좌하) 🎨
-#define PIN_KNOB_MODE    5   // Knob2, Q4(우하) 🔀
-#define PIN_KNOB_PATTERN 6   // Knob3, Q1(우상) 🎲
-#define PIN_KNOB_SPEED   7   // Knob4, Q2(좌상) ⚡
+// ─── Knob Pins (V2) ───
+#define PIN_KNOB_HUE     4   // Knob1 🎨
+#define PIN_KNOB_BRI     5   // Knob2 💡
+#define PIN_KNOB_MODE    6   // Knob3 🔀
+#define PIN_KNOB_FREQ    7   // Knob4 🎲
 
 // ─── ADC (경량화) ───
 #define ADC_ALPHA     0.1f
@@ -83,10 +72,10 @@ const ModePreset modes[NUM_MODES] = {
 
 // ─── Core 간 공유 변수 ───
 volatile float   knobHue      = 0.0f;
+volatile float   knobBri      = 1.0f;
 volatile int     knobMode     = 0;
 volatile float   knobFreqBase = 15.0f;
 volatile float   knobFreqVar  = 1.01f;
-volatile float   knobSpeed    = 4.0f;
 
 // ─── 현재 모드 상태 ───
 int curMode = -1;
@@ -189,16 +178,20 @@ TaskHandle_t adcTaskHandle = NULL;
 
 void adcTask(void *pvParameters) {
   float emaHue     = 0.5f;
+  float emaBri     = 1.0f;
   float emaMode    = 0.0f;
-  float emaPattern = 0.0f;
-  float emaSpeed   = 0.5f;
+  float emaFreq    = 0.0f;
 
-  int lastPatternStep = -1;
+  int lastFreqStep = -1;
 
   for (;;) {
     // ── Hue: 연속 ──
     readSmooth(PIN_KNOB_HUE, &emaHue);
     knobHue = emaHue;
+
+    // ── Brightness: 연속 ──
+    readSmooth(PIN_KNOB_BRI, &emaBri);
+    knobBri = emaBri;
 
     // ── Mode: 6단계 스냅 ──
     readSmooth(PIN_KNOB_MODE, &emaMode);
@@ -208,15 +201,15 @@ void adcTask(void *pvParameters) {
       knobMode = mode;
     }
 
-    // ── Pattern: 8-step ──
+    // ── Freq: 8-step ──
     //   step 0 = freqVar 1.01 고정 (타일 균일)
-    //   step 1~7 = 스텝 바뀔 때마다 랜덤 freqBase + freqVar
-    readSmooth(PIN_KNOB_PATTERN, &emaPattern);
+    //   step 1~7 = 스텝 바뀌때마다 랜덤 freqBase + freqVar
+    readSmooth(PIN_KNOB_FREQ, &emaFreq);
     {
-      int step = (int)(emaPattern * PATTERN_STEPS);
+      int step = (int)(emaFreq * PATTERN_STEPS);
       if (step >= PATTERN_STEPS) step = PATTERN_STEPS - 1;
 
-      if (step != lastPatternStep) {
+      if (step != lastFreqStep) {
         if (step == 0) {
           knobFreqBase = 15.0f;
           knobFreqVar  = 1.01f;
@@ -224,13 +217,9 @@ void adcTask(void *pvParameters) {
           knobFreqBase = randomFloat(5.0f, 30.0f);
           knobFreqVar  = randomFloat(1.01f, 50.0f);
         }
-        lastPatternStep = step;
+        lastFreqStep = step;
       }
     }
-
-    // ── Speed: 연속 (0~8) ──
-    readSmooth(PIN_KNOB_SPEED, &emaSpeed);
-    knobSpeed = emaSpeed * 8.0f;
 
     vTaskDelay(pdMS_TO_TICKS(20));
   }
@@ -302,7 +291,7 @@ void setup() {
 
   dma_display = new MatrixPanel_I2S_DMA(mxconfig);
   if (!dma_display->begin()) { while(1); }
-  dma_display->setBrightness8(255);
+  dma_display->setBrightness8((uint8_t)(knobBri * 255));
   dma_display->clearScreen();
 
   buildSinLUT();
@@ -311,9 +300,9 @@ void setup() {
 
   analogReadResolution(12);
   pinMode(PIN_KNOB_HUE,     INPUT);
+  pinMode(PIN_KNOB_BRI,     INPUT);
   pinMode(PIN_KNOB_MODE,    INPUT);
-  pinMode(PIN_KNOB_PATTERN, INPUT);
-  pinMode(PIN_KNOB_SPEED,   INPUT);
+  pinMode(PIN_KNOB_FREQ,    INPUT);
 
   xTaskCreatePinnedToCore(adcTask, "ADC", 4096, NULL, 2, &adcTaskHandle, 0);
 }
@@ -329,13 +318,14 @@ void loop() {
   float dt = (now - lastMs) / 1000.0f;
   lastMs = now;
 
-  phase += dt * knobSpeed * 2.0f;
+  phase += dt * 4.0f * 2.0f;
 
   int mode = knobMode;
   if (mode != curMode) {
     applyMode(mode);
   }
 
+  dma_display->setBrightness8((uint8_t)(knobBri * 255));
   renderPattern(phase);
   dma_display->flipDMABuffer();
   delay(1);
